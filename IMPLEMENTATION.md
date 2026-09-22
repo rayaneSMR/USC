@@ -27,10 +27,10 @@ toute la mécanique fonctionne.
 6. [Entraînement en 4 phases (AMP)](#6-entraînement-en-4-phases-amp)
 7. [Export ONNX et déploiement edge](#7-export-onnx-et-déploiement-edge)
 8. [Compression du modèle](#8-compression-du-modèle)
-9. [Bugs réels trouvés et corrigés](#9-bugs-réels-trouvés-et-corrigés)
+
 10. [Structure du dépôt](#10-structure-du-dépôt)
 11. [Comment lancer le projet](#11-comment-lancer-le-projet)
-12. [Ce qui reste à faire](#12-ce-qui-reste-à-faire)
+
 
 ---
 
@@ -66,11 +66,12 @@ Chaque bloc est un module PyTorch indépendant dans `net/`, assemblé par
 
 Extrait les caractéristiques de l'image brute. Trois options :
 
-| Backbone | Classe | Usage |
-|---|---|---|
-| `simple_cnn` | `SimpleCNNBackbone` | CNN léger, pas de poids externes — développement rapide |
-| `yolo26` | `YOLO26Backbone` | Vrais poids `ultralytics.YOLO`, backbone+neck de `yolo26n-seg.pt` |
-| `segformer_mitb5` | `SegFormerMiTB5Backbone` | Encodeur `transformers.SegformerModel`, config officielle MiT-B5 |
+
+| Backbone          | Classe                   | Usage                                                            |
+| ----------------- | ------------------------ | ---------------------------------------------------------------- |
+| `simple_cnn`      | `SimpleCNNBackbone`      | CNN léger, pas de poids externes — développement rapide       |
+| `yolo26`          | `YOLO26Backbone`         | Vrais poids`ultralytics.YOLO`, backbone+neck de `yolo26n-seg.pt` |
+| `segformer_mitb5` | `SegFormerMiTB5Backbone` | Encodeur`transformers.SegformerModel`, config officielle MiT-B5  |
 
 **YOLO26Backbone** utilise un `forward_pre_hook` posé sur la dernière
 couche (`Segment26`, la tête de segmentation) pour intercepter les
@@ -258,18 +259,21 @@ différentiable de bout en bout (§3.2).
 ### 3.1 Gain de canal composite `h = h_c · h_t · h_p`
 
 **Atténuation Beer-Lambert** (déterministe) :
+
 ```python
 h_c = exp(-c_e · L)   # c_e ≈ 0.151 m⁻¹ pour eau claire
 ```
 
 **Turbulence océanique log-normale** (régime de faible turbulence,
 moyenne d'ouverture avec la lentille réceptrice) :
+
 ```python
 T ~ N(μ_T, σ_T²),  μ_T = -σ_T²/2
 h_t = exp(T)
 ```
 
 **Erreur de pointage géométrique** (distribution de Rayleigh) :
+
 ```python
 h_p = A₀ · exp(-2r_d² / w_Leq²),  A₀ = erf(ν)²,  ν = D_r·π / (2√2·w_Leq)
 ```
@@ -300,6 +304,7 @@ conformément, jamais réintroduit.
 ```python
 σ_n² = R_L² · 2e·G·B_e·(I_s + I_d + I_b) + 4·k_B·T_e·B_e/R_L
 ```
+
 (grenaille signal-dépendante + bruit thermique TIA)
 
 ### 3.3 Seuil optimal et BER exact
@@ -317,14 +322,14 @@ désormais le chemin de calcul réel.
 **Bug de calibration trouvé et corrigé** : les valeurs par défaut
 `R_L=1e4 Ω, G=1e6` donnaient un bruit de grenaille (`∝ R_L²·G`) démesuré
 face au signal, quelle que soit la distance (BER non-monotone, parfois
-BER(100m) < BER(50m) — physiquement impossible). Recalibré à `R_L=1e3 Ω,
-G=1e5`, donnant une courbe BER-vs-distance cohérente (vérifiée par test) :
+BER(100m) < BER(50m) — physiquement impossible). Recalibré à `R_L=1e3 Ω, G=1e5`, donnant une courbe BER-vs-distance cohérente (vérifiée par test) :
 
-| Distance | BER théorique |
-|---|---|
-| 1 m | ~0.0003% |
-| 20 m | ~24.5% |
-| 60 m | ~49.4% (saturation, effet falaise §5) |
+
+| Distance | BER théorique                         |
+| -------- | -------------------------------------- |
+| 1 m      | ~0.0003%                               |
+| 20 m     | ~24.5%                                 |
+| 60 m     | ~49.4% (saturation, effet falaise §5) |
 
 ### 3.4 Compatibilité GPU
 
@@ -346,17 +351,18 @@ l'attribut figé.
 
 Avant tout traitement, force chaque dimension démappée dans ses bornes FSQ
 d'entraînement (§3.3) :
+
 ```python
 ẑ_clamped,i = clamp(ẑ_i, -(Lᵢ-1)/2, +(Lᵢ-1)/2)
 ```
+
 Empêche les activations aberrantes causées par des bits inversés de
 déstabiliser les couches de normalisation en aval.
 
 ### 4.2 IRSNet — `net/irsnet.py`
 
 U-Net résiduel multi-échelle (§3.3), débruite le tenseur latent bruité par
-le canal. Architecture : `stem → [ResBlock, Down]×depth → bottleneck →
-[Up, ResBlock]×depth → head`, connexions résiduelles à chaque niveau.
+le canal. Architecture : `stem → [ResBlock, Down]×depth → bottleneck → [Up, ResBlock]×depth → head`, connexions résiduelles à chaque niveau.
 
 **Bug corrigé** : pour des résolutions d'entrée non divisibles par
 `2^depth` (ex. 111×111), un `Down` (stride 2, arrondi par troncature) suivi
@@ -375,6 +381,7 @@ transposées (`UpBlock` = `ConvTranspose2d + BatchNorm + ReLU`), sortie
 construction, mais différents backbones sous-échantillonnent différemment
 (simple_cnn ×8, YOLO26/SegFormer ×32 à l'échelle profonde) — mismatch de
 résolution en sortie. Corrigé en deux temps :
+
 1. `net/pipeline.py::_infer_downsample_factor` calcule le facteur réel par
    une passe factice à la construction, et dimensionne
    `num_upsamples = log2(downsample_factor)` en conséquence.
@@ -391,11 +398,12 @@ de têtes suffit quel que soit le backbone émetteur (YOLO26 ou SegFormer).
 
 Deux implémentations disponibles, sélectionnées via `config.use_real_task_heads` :
 
-| | `SimpleSegmentationHead`/`SimpleClassificationHead` | `SegFormerSegmentationHead`/`SegFormerClassificationHead` |
-|---|---|---|
-| Poids | CNN léger, non pré-entraîné | Encodeur MiT-B5 complet + tête officielle `transformers` |
-| Usage | Dev rapide, tests | §3.4 du document — têtes "réelles" |
-| Coût mémoire | Faible | ~80M params ×2 (seg+cls) |
+
+|                | `SimpleSegmentationHead`/`SimpleClassificationHead` | `SegFormerSegmentationHead`/`SegFormerClassificationHead` |
+| -------------- | --------------------------------------------------- | --------------------------------------------------------- |
+| Poids          | CNN léger, non pré-entraîné                     | Encodeur MiT-B5 complet + tête officielle`transformers`  |
+| Usage          | Dev rapide, tests                                   | §3.4 du document — têtes "réelles"                    |
+| Coût mémoire | Faible                                              | ~80M params ×2 (seg+cls)                                 |
 
 **Pourquoi pas la vraie tête `Segment26` de YOLO26** : elle fait de la
 **segmentation d'instance** (boîtes + masques par objet + NMS), pas de la
@@ -423,12 +431,13 @@ out = pipeline(x, link_distance=10.0, phase='phase2a')
 Le paramètre `phase` contrôle le comportement du canal et de l'attaque de
 masque (voir §6) :
 
-| `phase` | Canal actif ? | MATK actif ? |
-|---|---|---|
-| `'phase1'` | Non (régime analogique parfait) | Non |
-| `'phase2a'` | Oui | Oui |
-| `'phase3'` | Oui | Non |
-| `'phase4'` | Oui | Non |
+
+| `phase`     | Canal actif ?                    | MATK actif ? |
+| ----------- | -------------------------------- | ------------ |
+| `'phase1'`  | Non (régime analogique parfait) | Non          |
+| `'phase2a'` | Oui                              | Oui          |
+| `'phase3'`  | Oui                              | Non          |
+| `'phase4'`  | Oui                              | Non          |
 
 ```python
 def forward(self, x, link_distance, phase='phase1'):
@@ -458,10 +467,12 @@ Implémenté dans `engine/`, orchestré par `engine/amp_scheduler.py`. Suit
 exactement le protocole §4.
 
 ### Phase 1 — Extraction de Caractéristiques (FE) — `engine/phase1_fe.py`
+
 Entraînement conjoint encodeur+décodeur, **sans bruit de canal**
 (`phase='phase1'`). Têtes de tâches aval gelées. Perte : `L_P1 = ‖x-x̂‖₁`.
 
 ### Phase 2 — Renforcement de Robustesse (RE) — `engine/phase2_re.py`
+
 **Étape 2A** : encodeur **gelé** (backbone + **fusion ASFF** + edge
 bottleneck), IRSNet+Generator entraînés sous bruit binaire (BFP) et attaque
 de masque (MATK, ratio `2p`). Perte :
@@ -472,28 +483,34 @@ de masque (MATK, ratio `2p`). Perte :
 tout l'encodeur.
 
 ### Phase 3 — Alignement Entraînement-Test (TTA) — `engine/phase3_tta.py`
+
 Même perte que 2A, mais **MATK désactivé** (`phase='phase3'`) — supprime le
 décalage de distribution introduit par le masque artificiel.
 
 ### Phase 4 — Adaptation des Têtes de Tâches — `engine/phase4_task.py`
+
 Gel **complet** de la chaîne codec+canal (backbone, ASFF, bottleneck, FSQ,
 IRSNet, Generator). Seules les têtes `seg_head`/`cls_head` sont
 entraînées. Perte (`losses/latent_align.py::compute_phase4_loss`) :
+
 ```
 L_P4 = CE(seg) + λ_dice·Dice(seg) + λ_cls·CE(cls)
 ```
+
 **Fonctionnalité ajoutée** : la perte de classification (`cls_logits`,
 `cls_labels`) était absente de la version initiale de `compute_phase4_loss`
 (seule la segmentation était optimisée) — ajoutée, paramètre `lambda_cls`
 optionnel pour compatibilité arrière.
 
 ### Format des batches
+
 `datasets/coral_dataset.py::CoralDataset`/`DummyCoralDataset` renvoient un
 dictionnaire `{'image', 'mask', 'label', 'filename'}` par échantillon —
 tous les fichiers `engine/phase*.py` unpacktent via `batch['image']`,
 `batch['mask']`, `batch['label']` de façon cohérente.
 
 ### `DummyCoralDataset`
+
 En l'absence du vrai dataset (branchement volontairement différé),
 `datasets/coral_dataset.py::DummyCoralDataset` génère des images/masques/
 labels aléatoires de la bonne forme — permet de vérifier que **toute la
@@ -509,6 +526,7 @@ résultats scientifiquement valides.
 en ONNX pour déploiement sur la sonde.
 
 **Pourquoi un module séparé plutôt que le pipeline entier** :
+
 - Le canal physique contient du bruit aléatoire (`torch.randn`/`torch.normal`),
   non reproductible une fois figé dans un graphe ONNX déterministe.
 - Le récepteur (IRSNet, Generator, têtes) tourne côté **station de
@@ -541,17 +559,20 @@ non-déterminisme numérique inter-runtime plutôt que le canal physique.
 `utils/model_compression.py` — profilage et compression pour cible edge.
 
 ### Profilage (`profile_model`, `count_flops`, `count_parameters`)
+
 Comptage manuel des FLOPs/MACs via hooks forward sur `Conv2d`/`Linear`,
 sans dépendance externe. `count_parameters` mesure la taille **réellement
 sérialisée** (`state_dict`), fiable même pour un modèle quantifié (les
 poids packés ne sont pas de simples `nn.Parameter`, `numel()` seul sous-estime).
 
 ### Quantization statique calibrée (`quantize_backbone_static`)
+
 Flux PyTorch eager-mode complet (`QuantStub`/`DeQuantStub`, `prepare`,
 calibration, `convert`), **fonctionne et testé** sur nos propres modules
 (`Generator` : ×3 de compression, forward correct).
 
 **Limite constatée sur YOLO26** (documentée, pas cachée) :
+
 1. `SiLU` n'a pas de noyau quantized CPU natif → contourné avec un wrapper
    dequant→SiLU→quant (`_DequantActQuant`, technique standard).
 2. Les **additions résiduelles internes d'ultralytics**
@@ -569,36 +590,10 @@ device/cette taille de modèle) — un rappel qu'il faut toujours benchmarker
 sur le matériel cible réel, pas supposer.
 
 ### Pruning non structuré (`prune_backbone_unstructured`)
+
 Met à zéro une fraction des poids (`torch.nn.utils.prune`, norme L1).
 Réduit l'empreinte mémoire de stockage, **pas** les FLOPs/latence sans
 backend creux dédié.
-
----
-
-## 9. Bugs réels trouvés et corrigés
-
-Résumé chronologique de tous les bugs découverts en développant (par test,
-pas par relecture seule) :
-
-| # | Bug | Fichier | Impact |
-|---|---|---|---|
-| 1 | STE cassé (`×0.0`) dans `bit_mapping.encode()` | `net/bit_mapping.py` | Bloquait le gradient de l'encodeur |
-| 2 | Pas de STE dans `bit_mapping.decode()` | `net/bit_mapping.py` | Bloquait *tout* le gradient côté récepteur |
-| 3 | Roundtrip FSQ↔bits inexact pour `Lᵢ` pair | `net/bit_mapping.py` | Perte de 0.5 d'info, dimension corrompue |
-| 4 | Opérateurs bitwise non exportables ONNX | `net/bit_mapping.py` | Export ONNX impossible |
-| 5 | `Generator` upsampling figé, mismatch résolution | `net/generator.py`, `net/pipeline.py` | Crash selon le backbone |
-| 6 | `IRSNet` crash sur résolutions non divisibles par `2^depth` | `net/irsnet.py` | Crash sur tailles d'image arbitraires |
-| 7 | `pointing_error_rayleigh` sans échelle physique | `net/channel.py` | `h≈0` quasi systématique, BER≈0.5 toujours |
-| 8 | `R_L`/`G` mal calibrés | `config.py` | BER non-monotone, canal inutilisable |
-| 9 | Seuil BER empirique au lieu de la formule exacte | `net/channel.py` | Approximation grossière au lieu de la formule §3.2 |
-| 10 | `Channel.device` figé (pas un buffer) | `net/channel.py` | Risque de crash device mismatch sur GPU |
-| 11 | `reference_index` ASFF mal choisi (coût edge) | `net/multiscale_fusion.py` | Contredit la contrainte edge discutée |
-| 12 | ASFF absent des listes de gel Phase 2A/4 | `engine/phase2_re.py`, `engine/phase4_task.py` | Module censé être gelé restait entraînable |
-| 13 | Tête de classification absente du pipeline assemblé | `net/pipeline.py` | §3.4 exige les deux têtes (seg+cls) |
-| 14 | `main.py` important une classe dataset inexistante | `datasets/coral_dataset.py`, `main.py` | Crash immédiat au lancement |
-| 15 | `count_parameters` sous-estimait la taille des modèles quantifiés | `utils/model_compression.py` | Métrique de compression trompeuse |
-
----
 
 ## 10. Structure du dépôt
 
