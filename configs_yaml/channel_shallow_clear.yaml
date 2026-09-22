@@ -1,0 +1,10 @@
+# Paramètres canal pour eau claire peu profonde (référence Ijeh et al.)
+c_e: 0.151
+sigma_T2: 0.05
+D_r: 0.075
+w_Leq: 0.05
+R_e: 0.5
+R_L: 10000.0
+G: 1000000.0
+B_e: 1000000.0
+T_e: 298.0

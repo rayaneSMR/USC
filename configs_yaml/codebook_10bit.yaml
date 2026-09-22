@@ -1,0 +1,8 @@
+# Codebook 2^10 = 1024, 10 bits/token — Forte compression
+fsq_levels: [8, 5, 5, 5]
+bottleneck_dim: 4
+feature_map_size: 96
+channel_type: uwoc_im_dd
+link_distance: 12.0
+batch_size: 8
+lr: 0.0001

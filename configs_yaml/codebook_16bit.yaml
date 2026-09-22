@@ -1,0 +1,8 @@
+# Codebook 2^16 = 65536, 16 bits/token — Haute fidélité optique
+fsq_levels: [8, 8, 8, 5, 5, 5]
+bottleneck_dim: 6
+feature_map_size: 96
+channel_type: uwoc_im_dd
+link_distance: 8.0
+batch_size: 8
+lr: 0.0001
