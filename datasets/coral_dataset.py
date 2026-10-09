@@ -82,6 +82,13 @@ class CoralDataset(Dataset):
                     if has_mask_col:
                         self.has_mask_flags[row[0]] = int(row[2])
 
+        # Précalcul de has_mask_list pour tous les échantillons (pour le Sampler stratifié)
+        self.has_mask_list = []
+        for fname in self.filenames:
+            stem = os.path.splitext(fname)[0]
+            mask_path = os.path.join(self.mask_dir, stem + '.png')
+            self.has_mask_list.append(os.path.exists(mask_path))
+
         image_tf_steps = [
             T.Resize((image_size, image_size)),
             T.ToTensor(),  # -> [0,1]
@@ -147,23 +154,35 @@ class DummyCoralDataset(Dataset):
     scientifiques valides.
     """
 
-    def __init__(self, num_samples=64, image_size=128, num_classes_seg=2, num_classes_cls=3):
+    def __init__(self, num_samples=64, image_size=128, num_classes_seg=2, num_classes_cls=3,
+                 mask_ratio=0.5):
         self.num_samples = num_samples
         self.image_size = image_size
         self.num_classes_seg = num_classes_seg
         self.num_classes_cls = num_classes_cls
+        self.mask_ratio = mask_ratio
+        num_pos = int(round(num_samples * mask_ratio))
+        self.has_mask_list = [True] * num_pos + [False] * (num_samples - num_pos)
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
+        has_mask = self.has_mask_list[idx]
         image = torch.rand(3, self.image_size, self.image_size)
-        mask = torch.randint(0, self.num_classes_seg, (self.image_size, self.image_size), dtype=torch.long)
+        if has_mask:
+            mask = torch.randint(0, self.num_classes_seg, (self.image_size, self.image_size), dtype=torch.long)
+        else:
+            mask = torch.zeros(self.image_size, self.image_size, dtype=torch.long)
         label = torch.randint(0, self.num_classes_cls, (1,), dtype=torch.long).squeeze(0)
         return {
             'image': image,
             'mask': mask,
-            'has_mask': torch.tensor(True),  # toujours True : données synthétiques, pas de contrainte réelle
+            'has_mask': torch.tensor(has_mask, dtype=torch.bool),
             'label': label,
             'filename': f'dummy_{idx}.jpg',
         }
+
+
+# Export pratique
+from datasets.sampler import StratifiedSampler, StratifiedBatchSampler

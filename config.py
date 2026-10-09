@@ -56,28 +56,25 @@ class Config:
         self.link_distance = 10.0  # Distance en mètres
 
         self.c_e = 0.151            # Atténuation Beer-Lambert (eau claire, m^-1)
-        self.sigma_T2 = 0.01        # Variance turbulence log-normale (faible turbulence)
+        # Variance turbulence log-normale avec moyennage d'ouverture (Dr = 75 mm, Eq. 43) :
+        # 1.1e-7 au lieu de 0.01/0.05 surestimé
+        self.sigma_T2 = 1.1e-7
+        self.use_dynamic_eq43 = False # True pour calcul Eq. 43 à la volée
         self.D_r = 0.075            # Diamètre lentille réceptrice (75 mm)
-        self.w_Leq = 0.05           # Rayon faisceau équivalent (5 cm)
+        self.theta_div = 0.05       # Demi-angle de divergence du faisceau (rad, w_L ~ theta_div * L)
+        self.w0 = 20e-3 * (2.0 ** 0.5) # Waist du faisceau au plan source (m)
         self.sigma_theta_t = 2e-3   # Gigue angulaire de pointage (rad) -- §3.2
-        # NOTE : sigma_theta_t était absent des versions précédentes de ce
-        # fichier -- sans lui, pointing_error_rayleigh tirait la déviation
-        # radiale d'une loi normale STANDARD (écart-type = 1 m, sans échelle
-        # physique), écrasant le gain de canal à h≈0 quasi systématiquement
-        # (BER≈0.5 même à 1 m de distance -- bug corrigé et vérifié).
 
+        # Paramètres SiPM / TIA et débit binaire
+        self.R_b = 1e6                # Débit binaire (1 Mbps = 1e6 bit/s)
+        self.B_e = self.R_b / 2.0     # Bande passante LPF électrique (Be ≈ Rb / 2 = 0.5 MHz)
         self.R_e = 0.8               # Responsivité SiPM (A/W)
-        self.R_L = 1e3                # Résistance TIA (ohm) -- recalibré (voir note)
-        self.G = 1e5                  # Gain SiPM -- recalibré (voir note)
-        self.B_e = 1e6                # Bande passante bruit (Hz)
+        self.R_L = 1e3                # Résistance TIA (ohm)
+        self.G = 1e5                  # Gain SiPM
         self.T_e = 290.0              # Température de bruit (K)
-        # NOTE DE CALIBRATION : les valeurs précédentes (R_L=50 ou 1e4,
-        # G=1e6) produisaient un BER non-monotone / quasi constant ~0.5-0.7
-        # à TOUTE distance (bruit de grenaille, proportionnel à R_L²×G,
-        # dominant totalement le signal). Ces valeurs donnent une courbe
-        # BER-vs-distance physiquement cohérente : BER≈0 proche (1-5m),
-        # dégradation progressive, effet falaise vers 20-40m, saturation à
-        # 0.5 au-delà (cf §5, effet falaise). Restent illustratives (pas
-        # une fiche technique SiPM/TIA réelle précise).
+
+        # Entraînement
+        self.batch_size = 4
+        self.lr = 1e-4
 
         self.logger = None

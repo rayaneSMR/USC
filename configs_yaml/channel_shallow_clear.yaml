@@ -1,10 +1,12 @@
 # Paramètres canal pour eau claire peu profonde (référence Ijeh et al.)
 c_e: 0.151
-sigma_T2: 0.05
-D_r: 0.075
-w_Leq: 0.05
-R_e: 0.5
-R_L: 10000.0
-G: 1000000.0
-B_e: 1000000.0
-T_e: 298.0
+sigma_T2: 1.1e-7      # Variance turbulence réaliste avec moyennage d'ouverture (Dr=75mm)
+D_r: 0.075           # Diamètre de la lentille Rx (75 mm)
+theta_div: 0.05      # Divergence du faisceau (rad, w_L ~ theta_div * L)
+w0: 0.02828427       # Waist à la source (alpha_s * sqrt(2))
+R_b: 1000000.0       # Débit binaire (1 Mbps)
+B_e: 500000.0        # Bande passante LPF électrique (Be ≈ Rb / 2)
+R_e: 0.8
+R_L: 1000.0
+G: 100000.0
+T_e: 290.0

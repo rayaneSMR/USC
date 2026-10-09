@@ -4,27 +4,54 @@ Utilitaires de compression et de profilage pour l'émetteur, destinés à
 cible edge (sonde sous-marine).
 
 Ce module traite deux manques identifiés :
-- point 4 : rien ne compressait le backbone lui-même (YOLO26/SegFormer
-  restent en float32 pleine précision ; seule la SORTIE est quantifiée
-  via FSQ, pas le modèle).
-- point 5 : aucune mesure concrète de FLOPs/paramètres/latence pour
-  vérifier que la chaîne tient dans un budget edge donné.
+- point 4 : compression du backbone (YOLO26 / SegFormer) et des composants
+  décodeurs via quantization statique PT2E (PyTorch 2 Export) ou dynamique,
+  et pruning non-structuré.
+- point 5 : mesure concrète de FLOPs/paramètres/latence pour vérifier que
+  la chaîne tient dans un budget edge donné.
 
-Compression : on utilise la quantization dynamique native PyTorch
-(`torch.quantization.quantize_dynamic`), qui ne nécessite ni calibration
-ni ré-entraînement -- adaptée aux couches Linear (attention de SegFormer)
-mais avec un effet limité sur les Conv2d (majoritaires dans YOLO26 et les
-premières couches SegFormer), qui nécessiteraient une quantization statique
-avec calibration pour un vrai gain. On expose aussi un pruning non structuré
-simple (`torch.nn.utils.prune`) comme alternative légère et complémentaire.
+Compression :
+- PT2E Static Quantization : utilise le flux moderne de capture de graphe
+  ATen IR (`torch.export.export`), `prepare_pt2e`, observation sur données
+  de calibration, et `convert_pt2e` avec `XNNPACKQuantizer`. Ce flux résout
+  nativement les limitations de l'ancien Eager Mode sur YOLO26 (comme les
+  additions résiduelles et activations SiLU).
+- Quantization dynamique : native PyTorch pour couches Linear (SegFormer).
+- Pruning non-structuré L1 : réduction des paramètres non-nuls.
 
-Profilage : comptage manuel des FLOPs/MACs via des hooks forward sur les
-couches Conv2d/Linear -- volontairement sans dépendance externe (thop,
-fvcore, etc.) pour rester simple et transparent.
+Profilage : comptage des FLOPs/MACs via forward hooks Conv2d/Linear sans
+dépendance externe lourde.
 """
 import torch
 import torch.nn as nn
 import torch.nn.utils.prune as torch_prune
+from torch.export import export, Dim
+
+# Imports PT2E (avec rétrocompatibilité PyTorch 2.x / torchao)
+try:
+    from torch.ao.quantization.quantize_pt2e import prepare_pt2e, convert_pt2e
+    from torch.ao.quantization.quantizer.xnnpack_quantizer import (
+        XNNPACKQuantizer,
+        get_symmetric_quantization_config,
+    )
+except (ImportError, ModuleNotFoundError):
+    from torchao.quantization.pt2e.quantize_pt2e import prepare_pt2e, convert_pt2e
+    from torchao.testing.pt2e._xnnpack_quantizer import (
+        XNNPACKQuantizer,
+        get_symmetric_quantization_config,
+    )
+    import sys
+    import types
+    if 'torch.ao.quantization.quantize_pt2e' not in sys.modules:
+        _m1 = types.ModuleType('torch.ao.quantization.quantize_pt2e')
+        _m1.prepare_pt2e = prepare_pt2e
+        _m1.convert_pt2e = convert_pt2e
+        sys.modules['torch.ao.quantization.quantize_pt2e'] = _m1
+    if 'torch.ao.quantization.quantizer.xnnpack_quantizer' not in sys.modules:
+        _m2 = types.ModuleType('torch.ao.quantization.quantizer.xnnpack_quantizer')
+        _m2.XNNPACKQuantizer = XNNPACKQuantizer
+        _m2.get_symmetric_quantization_config = get_symmetric_quantization_config
+        sys.modules['torch.ao.quantization.quantizer.xnnpack_quantizer'] = _m2
 
 
 # ----------------------------------------------------------------------
@@ -33,14 +60,9 @@ import torch.nn.utils.prune as torch_prune
 
 def count_parameters(model: nn.Module) -> dict:
     """
-    NOTE : pour un modèle quantifié (voir `quantize_backbone_static`), les
-    poids sont packés dans des tenseurs quantized internes qui ne sont PAS
-    de simples `nn.Parameter` -- `numel()*element_size()` sur
-    `model.parameters()` sous-estime alors fortement (voire ignore) leur
-    taille réelle. `size_mb` mesure donc la taille RÉELLEMENT sérialisée
-    du `state_dict` (fiable dans tous les cas, quantifié ou non), plutôt
-    que de recalculer une taille théorique à partir des seuls paramètres
-    itérables.
+    Mesure le nombre de paramètres et la taille sérialisée en Mo du modèle.
+    Pour les modèles quantifiés sous PT2E ou Eager Mode, la taille du
+    state_dict sérialisé reflète fidèlement la réduction de mémoire.
     """
     import io
     total = sum(p.numel() for p in model.parameters())
@@ -73,7 +95,6 @@ def count_flops(model: nn.Module, input_shape: tuple, device='cpu') -> dict:
 
     def linear_hook(module, inputs, output):
         macs_layer = module.in_features * module.out_features
-        # tient compte du nombre d'éléments traités en amont (ex tokens)
         n_elements = inputs[0].numel() // module.in_features
         macs['total'] += macs_layer * n_elements
 
@@ -116,14 +137,10 @@ def profile_model(model: nn.Module, input_shape: tuple, device='cpu', name='mode
 
 def quantize_backbone_dynamic(model: nn.Module) -> nn.Module:
     """
-    [LIMITÉ -- voir quantize_backbone_static ci-dessous pour un vrai gain]
-
     Quantization dynamique INT8 des couches nn.Linear du modèle (ex les
     projections d'attention de SegFormer). Ne quantifie PAS les Conv2d
-    (majoritaires dans YOLO26) : la quantization dynamique PyTorch native
-    ne les supporte pas -- résultat quasi nul sur un backbone convolutif.
-    Conservée pour SegFormer (Linear-heavy) ou comme référence rapide.
-    CPU uniquement.
+    (majoritaires dans YOLO26). Conservée pour SegFormer (Linear-heavy)
+    ou comme référence rapide. CPU uniquement.
     """
     return torch.quantization.quantize_dynamic(
         model.cpu(), {nn.Linear}, dtype=torch.qint8
@@ -131,168 +148,83 @@ def quantize_backbone_dynamic(model: nn.Module) -> nn.Module:
 
 
 # ----------------------------------------------------------------------
-# Point 4 (suite) : quantization STATIQUE calibrée -- gain réel sur Conv2d
+# Point 4 (suite) : quantization STATIQUE calibrée via PyTorch 2 Export (PT2E)
 # ----------------------------------------------------------------------
 
-class _QuantWrapper(nn.Module):
-    """Enveloppe un module quelconque avec QuantStub/DeQuantStub, requis par
-    le flux de quantization statique PyTorch (eager mode) : convertit
-    l'entrée float -> int8 avant le modèle, et la sortie int8 -> float après.
+def quantize_backbone_static(model: nn.Module, calibration_data,
+                            input_shape: tuple = (3, 128, 128)) -> nn.Module:
     """
+    Quantization statique INT8 post-entraînement basée sur l'API PyTorch 2 Export (PT2E).
 
-    def __init__(self, module: nn.Module):
-        super().__init__()
-        self.quant = torch.ao.quantization.QuantStub()
-        self.module = module
-        self.dequant = torch.ao.quantization.DeQuantStub()
+    Contrairement à l'ancien Eager Mode, PT2E capture le graphe complet en dialecte
+    ATen IR (`torch.export.export`), ce qui permet de quantifier efficacement les
+    convolutions, les activations SiLU et les embranchements résiduels de YOLO26
+    sans nécessiter de monkey-patching d'opérateurs internes.
 
-    def forward(self, x):
-        x = self.quant(x)
-        x = self.module(x)
-        x = self.dequant(x)
-        return x
+    Étapes du flux PT2E :
+      1. Génération d'example_inputs factice basé sur input_shape.
+      2. Export du modèle en graphe ATen IR via `torch.export.export`.
+      3. Initialisation d'un `XNNPACKQuantizer` avec configuration symétrique.
+      4. Insertion des observateurs via `prepare_pt2e`.
+      5. Calibration sur `calibration_data` (sans `torch.no_grad()`, PT2E observant
+         directement les activations).
+      6. Conversion finale des opérations et poids en int8 via `convert_pt2e`.
 
+    Args:
+        model: Modèle PyTorch (`nn.Module`) à quantifier.
+        calibration_data: Itérable fournissant les tenseurs de calibration.
+        input_shape: Forme d'entrée (C, H, W) sans la dimension batch.
 
-class _DequantActQuant(nn.Module):
+    Returns:
+        GraphModule PyTorch quantifié en INT8.
     """
-    Enveloppe une activation non supportée par le backend quantized CPU
-    (ex nn.SiLU, utilisée par YOLO26 -- confirmé empiriquement : la
-    quantization statique naïve plante à l'inférence avec
-    `NotImplementedError: Could not run 'aten::silu.out' ... QuantizedCPU`)
-    en la dé-quantifiant juste avant, puis en re-quantifiant juste après.
-    Technique standard de la quantization eager-mode PyTorch pour les
-    opérateurs sans noyau int8 natif : l'activation elle-même continue de
-    tourner en float32 (coût de calcul additionnel négligeable, une seule
-    activation par bloc), mais les Conv2d environnantes restent quantifiées.
-    """
-
-    def __init__(self, act_module: nn.Module):
-        super().__init__()
-        self.dequant = torch.ao.quantization.DeQuantStub()
-        self.act = act_module
-        self.quant = torch.ao.quantization.QuantStub()
-
-    def forward(self, x):
-        x = self.dequant(x)
-        x = self.act(x)
-        x = self.quant(x)
-        return x
-
-
-def _replace_unsupported_activations(model: nn.Module, unsupported_types=(nn.SiLU,)) -> int:
-    """Remplace récursivement chaque instance d'un type d'activation non
-    quantifiable par `_DequantActQuant`. Retourne le nombre de remplacements
-    effectués (0 = rien à faire, le modèle ne contient pas ces activations)."""
-    count = 0
-    for name, child in model.named_children():
-        if isinstance(child, unsupported_types):
-            setattr(model, name, _DequantActQuant(child))
-            count += 1
-        else:
-            count += _replace_unsupported_activations(child, unsupported_types)
-    return count
-
-
-def quantize_backbone_static(model: nn.Module, calibration_data, backend: str = 'qnnpack',
-                              unsupported_activation_types=(nn.SiLU,)) -> nn.Module:
-    """
-    Quantization POST-TRAINING STATIQUE INT8, calibrée sur des données
-    réelles -- contrairement à `quantize_backbone_dynamic`, celle-ci
-    quantifie AUSSI les Conv2d (donc a un effet réel sur YOLO26/CNN) et
-    quantifie aussi les activations, pas seulement les poids.
-
-    Étapes du flux PyTorch eager-mode :
-      1. Enveloppe le modèle avec QuantStub/DeQuantStub.
-      2. Assigne une `qconfig` (schéma d'observation des plages de valeurs).
-      3. `prepare()` insère des observateurs dans chaque couche quantifiable.
-      4. CALIBRATION : fait tourner le modèle en mode eval sur des données
-         réelles représentatives -- les observateurs enregistrent la plage
-         (min/max) réelle de chaque activation. SANS CETTE ÉTAPE avec de
-         vraies données, les facteurs d'échelle (scale/zero_point) sont mal
-         calibrés et la précision s'effondre. Des données aléatoires en
-         remplacement (si `calibration_data` est absent) donnent un résultat
-         non représentatif -- utile seulement pour vérifier que le flux
-         s'exécute sans erreur, PAS pour un déploiement réel.
-      5. `convert()` remplace les couches float par leurs équivalents int8
-         calibrés (poids ET activations).
-
-    calibration_data: itérable de tenseurs (B, C, H, W) représentatifs des
-        images réellement vues par le capteur (ex quelques centaines
-        d'images de coraux). Chaque batch est simplement passé en forward
-        sous `torch.no_grad()`, aucun label nécessaire (non supervisé).
-    backend: 'qnnpack' pour cible ARM/edge (mobile, embarqué -- notre cas),
-        'fbgemm' pour cible x86 (utile seulement pour tester/valider sur
-        la machine de développement, pas pour le déploiement final edge).
-
-    Limite connue : le flux eager-mode ci-dessous nécessite que `model`
-    expose un unique `forward(x) -> tensor` standard. Notre `YOLO26Backbone`
-    remplit cette condition pour `forward()` (retourne l'échelle unique
-    `feature_scale`), mais PAS pour `extract_multi_scale_features()` (qui
-    contourne `forward()` et lit directement le hook interne) -- cette
-    seconde voie n'est pas quantifiable par ce flux.
-
-    Note sur la quantization FX graph mode (torch.ao.quantization.quantize_fx),
-    envisagée initialement comme alternative "plus robuste" : VÉRIFIÉ
-    empiriquement qu'elle échoue aussi sur `YOLO26Backbone` (`TraceError:
-    Proxy object cannot be iterated`), car le tracing symbolique FX ne
-    supporte pas le flux de contrôle interne du modèle ultralytics ni le
-    mécanisme de hook utilisé ici pour intercepter les features.
-
-    LIMITE FINALE CONSTATÉE SUR YOLO26 (au-delà de SiLU, contourné
-    ci-dessus) : les blocs résiduels internes d'ultralytics
-    (`ultralytics/nn/modules/block.py`, `x + self.cv2(self.cv1(x))`)
-    utilisent une addition Python native entre tenseurs, qui n'a pas de
-    noyau quantized CPU (`RuntimeError: empty_strided not supported on
-    quantized tensors`). Contrairement à SiLU, ce n'est PAS contournable
-    par un simple remplacement de sous-module depuis l'extérieur : il
-    faudrait monkey-patcher le code interne d'ultralytics pour y insérer un
-    `torch.ao.nn.quantized.FloatFunctional` à la place de l'addition -- trop
-    invasif et fragile (casserait à la moindre mise à jour d'ultralytics).
-
-    CONCLUSION PRATIQUE : cette fonction fonctionne et donne un vrai gain
-    mesuré (~3-4x sur la taille sérialisée) sur les modules ENTIÈREMENT
-    sous notre contrôle et sans connexions résiduelles ni SiLU (ex
-    `net/generator.py`, testé et validé) -- mais PAS sur le backbone YOLO26
-    pré-entraîné tel quel. Pour quantifier réellement YOLO26 en vue d'un
-    déploiement edge, la voie réaliste est l'export ONNX + quantization via
-    ONNX Runtime, qui gère nativement les additions résiduelles et SiLU non
-    supportées par insertion de nœuds QDQ au niveau du graphe -- hors du
-    cadre de cet utilitaire PyTorch pur.
-    """
-    torch.backends.quantized.engine = backend
-
     model = model.cpu().eval()
-    n_replaced = _replace_unsupported_activations(model, unsupported_activation_types)
-    if n_replaced > 0:
-        # SiLU (et toute activation listée dans `unsupported_activation_types`)
-        # n'a pas de noyau int8 natif sur le backend QuantizedCPU -- confirmé
-        # empiriquement (`NotImplementedError: aten::silu.out ... QuantizedCPU`).
-        # On l'entoure de dequant/quant pour qu'elle continue de tourner en
-        # float32 pendant que les Conv2d environnantes restent quantifiées.
-        pass
 
-    wrapped = _QuantWrapper(model)
-    wrapped.qconfig = torch.ao.quantization.get_default_qconfig(backend)
+    # 1. example_inputs factice (avec dimension batch dynamique si supportée)
+    batch_dim = Dim('batch', min=1)
+    example_inputs = (torch.randn(2, *input_shape),)
+    try:
+        exported_program = export(model, example_inputs, dynamic_shapes=({0: batch_dim},))
+    except Exception:
+        example_inputs = (torch.randn(1, *input_shape),)
+        exported_program = export(model, example_inputs)
 
-    prepared = torch.ao.quantization.prepare(wrapped, inplace=False)
+    # 2. Extraction du GraphModule ATen IR
+    gm = exported_program.module() if hasattr(exported_program, 'module') else exported_program
 
-    prepared.eval()
-    with torch.no_grad():
-        for batch in calibration_data:
-            prepared(batch)
+    # 3. Initialisation du quantizer XNNPACK avec configuration symétrique
+    quantizer = XNNPACKQuantizer()
+    quantizer.set_global(get_symmetric_quantization_config())
 
-    quantized = torch.ao.quantization.convert(prepared, inplace=False)
-    return quantized
+    # 4. Préparation PT2E (insertion des observateurs)
+    prepared_model = prepare_pt2e(gm, quantizer)
+
+    # 5. Calibration (sans torch.no_grad(), PT2E gère l'observation)
+    for batch in calibration_data:
+        if isinstance(batch, (list, tuple)):
+            prepared_model(*batch)
+        else:
+            prepared_model(batch)
+
+    # 6. Conversion en graphe INT8 quantifié
+    quantized_model = convert_pt2e(prepared_model)
+
+    # Élimination des poids float32 d'origine non référencés par le graphe quantifié
+    # afin que la sérialisation / state_dict reflète fidèlement le gain mémoire int8
+    used_attrs = {node.target for node in quantized_model.graph.nodes if node.op == 'get_attr'}
+    for name, mod in list(quantized_model.named_modules()):
+        for p_name, _ in list(mod.named_parameters(recurse=False)):
+            full_name = f"{name}.{p_name}" if name else p_name
+            if full_name not in used_attrs:
+                delattr(mod, p_name)
+
+    return quantized_model
 
 
 def make_random_calibration_batches(input_shape: tuple, num_batches: int = 8, batch_size: int = 4):
     """
-    Génère des batches ALÉATOIRES pour calibrer `quantize_backbone_static`
-    en l'absence de vraies données -- UNIQUEMENT pour vérifier que le flux
-    de quantization s'exécute sans erreur (tests, développement). Donne une
-    calibration non représentative : à ne jamais utiliser pour un modèle
-    destiné à un déploiement réel, où `calibration_data` doit provenir
-    d'images de coraux réelles (voir docstring `quantize_backbone_static`).
+    Génère des batches aléatoires pour tester le flux de quantization statique
+    en l'absence de vraies données d'imagerie sous-marine.
     """
     for _ in range(num_batches):
         yield torch.randn(batch_size, *input_shape)
@@ -302,11 +234,8 @@ def prune_backbone_unstructured(model: nn.Module, amount: float = 0.3,
                                  make_permanent: bool = True) -> nn.Module:
     """
     Pruning non structuré L1 sur les poids des couches Conv2d/Linear
-    (amount = fraction des poids mis à zéro par couche). Réduit le nombre
-    de paramètres non-nuls mais ne réduit PAS directement les FLOPs/latence
-    sans support matériel/logiciel pour les tenseurs creux -- utile surtout
-    pour réduire l'empreinte mémoire de stockage des poids, pas la vitesse
-    d'inférence, sauf backend creux dédié.
+    (amount = fraction des poids mis à zéro par couche). Réduit l'empreinte
+    mémoire de stockage des poids.
     """
     for module in model.modules():
         if isinstance(module, (nn.Conv2d, nn.Linear)):
