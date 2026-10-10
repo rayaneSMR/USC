@@ -24,7 +24,7 @@ class MATK(nn.Module):
         z: (B, d, H, W) tenseur latent (typiquement après clamp, avant IRSNet).
         p: BER scalaire courant (issu du canal).
         """
-        if not self.enabled:
+        if not self.enabled or not self.training:
             return z
 
         ratio = torch.clamp(self.ratio_factor * p, 0.0, 0.9)

@@ -124,9 +124,14 @@ class UWOCSemComPipeline(nn.Module):
         z_q = self.fsq(z)
         return z_q
 
-    def forward(self, x, link_distance, phase='phase1'):
+    def forward(self, x, link_distance, phase='phase1', run_heads=True):
         # 1. Extraction et Goulot d'Étranglement (Edge)
         z_q = self.encode(x)
+
+        # Validation stricte de la phase
+        allowed_phases = ('phase1', 'phase2a', 'phase2b', 'phase3', 'phase4')
+        if phase not in allowed_phases:
+            raise ValueError(f"Phase inconnue: '{phase}'. Valeurs permises: {allowed_phases}")
 
         # 2. Canal Physique
         if phase == 'phase1':
@@ -154,8 +159,12 @@ class UWOCSemComPipeline(nn.Module):
 
         # 4. Génération visuelle et Tâches aval
         x_hat = self.generator(z_restored, target_size=x.shape[-2:])
-        seg_logits = self.seg_head(x_hat)
-        cls_logits = self.cls_head(x_hat)
+        if run_heads:
+            seg_logits = self.seg_head(x_hat)
+            cls_logits = self.cls_head(x_hat)
+        else:
+            seg_logits = None
+            cls_logits = None
 
         return {
             'x_hat': x_hat,

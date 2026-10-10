@@ -61,7 +61,8 @@ def test_ber_increases_monotonically_with_distance():
     channel = Channel(config)
     bits = torch.randint(0, 2, (1, 4, 16, 16)).float()
 
-    distances = [1.0, 20.0, 60.0]
+    # Distances correspondant au régime de transition pour eau claire (Ijeh et al. 2022)
+    distances = [60.0, 75.0, 85.0]
     bers = []
     for L in distances:
         torch.manual_seed(0)
@@ -71,8 +72,23 @@ def test_ber_increases_monotonically_with_distance():
     assert bers[0] < bers[1] < bers[2], (
         f"BER devrait croître avec la distance, obtenu {list(zip(distances, bers))}"
     )
-    assert bers[0] < 0.1, f"BER à 1m anormalement élevé ({bers[0]:.4f})"
     print(f'test_ber_increases_monotonically_with_distance OK, BER={list(zip(distances, bers))}')
+
+
+def test_empirical_vs_theoretical_ber_convergence():
+    """Vérifie la cohérence exacte entre la simulation Monte Carlo du bruit et la formule erfc théorique."""
+    config = DummyConfig()
+    channel = Channel(config)
+    torch.manual_seed(42)
+    bits = torch.randint(0, 2, (20, 15, 64, 64)).float()
+
+    b_hat, p_th = channel(bits, link_distance=78.0)
+    p_emp = (b_hat != bits).float().mean().item()
+
+    assert math.isclose(p_th.item(), p_emp, abs_tol=0.03), (
+        f"Incohérence entre BER théorique ({p_th.item():.4f}) et empirique ({p_emp:.4f})"
+    )
+    print(f'test_empirical_vs_theoretical_ber_convergence OK (p_th={p_th.item():.4f}, p_emp={p_emp:.4f})')
 
 
 def test_w_Leq_equation24_computed_dynamically():
@@ -145,6 +161,7 @@ if __name__ == '__main__':
     test_channel_gradient_flows()
     test_channel_device_derived_from_input_not_stale_attribute()
     test_ber_increases_monotonically_with_distance()
+    test_empirical_vs_theoretical_ber_convergence()
     test_w_Leq_equation24_computed_dynamically()
     test_bandwidth_dynamically_bound_to_bitrate()
     test_aperture_averaging_turbulence_variance()

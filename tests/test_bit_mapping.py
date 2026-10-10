@@ -15,13 +15,35 @@ def test_encode_decode_roundtrip_exact():
     fsq = FSQ(levels)
     bm = BitMapper(levels)
 
-    z = torch.randn(2, len(levels), 4, 4)
+    # Vérification du budget de bits exact : 3+3+3+3+3 = 15 bits physiques
+    assert bm.bits_per_dim == [3, 3, 3, 3, 3], f"Attendu [3, 3, 3, 3, 3], obtenu {bm.bits_per_dim}"
+    assert bm.total_bits == 15, f"Attendu 15 bits totaux, obtenu {bm.total_bits}"
+
+    z = torch.randn(2, len(levels), 4, 4) * 3.0
     z_q = fsq(z)
     b = bm.encode(z_q)
     z_hat = bm.decode(b)
 
     assert torch.allclose(z_q, z_hat, atol=1e-4), "roundtrip encode/decode incorrect sans bruit de canal"
     print('test_encode_decode_roundtrip_exact OK')
+
+
+def test_5bit_config_bit_budget_and_roundtrip():
+    """Vérifie la configuration 5-bit [2, 2, 2, 2, 2] : 5 bits physiques, roundtrip exact."""
+    levels = [2, 2, 2, 2, 2]
+    fsq = FSQ(levels)
+    bm = BitMapper(levels)
+
+    assert bm.bits_per_dim == [1, 1, 1, 1, 1]
+    assert bm.total_bits == 5
+
+    z = torch.randn(4, 5, 8, 8) * 3.0
+    z_q = fsq(z)
+    b = bm.encode(z_q)
+    z_hat = bm.decode(b)
+
+    assert torch.allclose(z_q, z_hat, atol=1e-4)
+    print('test_5bit_config_bit_budget_and_roundtrip OK')
 
 
 def test_gradient_flows_through_encode():
@@ -69,6 +91,7 @@ def test_gradient_flows_end_to_end_encode_decode():
 
 if __name__ == '__main__':
     test_encode_decode_roundtrip_exact()
+    test_5bit_config_bit_budget_and_roundtrip()
     test_gradient_flows_through_encode()
     test_gradient_flows_through_decode()
     test_gradient_flows_end_to_end_encode_decode()

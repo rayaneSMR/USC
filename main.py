@@ -26,6 +26,7 @@ def apply_yaml_config(cfg: Config, yaml_path: str) -> Config:
     """
     Parse le fichier YAML de configuration et écrase les attributs correspondants de cfg,
     notamment cfg.levels (ou fsq_levels) et dimension latente cfg.d.
+    Lie également dynamiquement B_e = R_b / 2 si R_b est modifié seul dans le YAML.
     """
     if not os.path.isfile(yaml_path):
         raise FileNotFoundError(f"Fichier de configuration YAML introuvable : {yaml_path}")
@@ -49,7 +50,70 @@ def apply_yaml_config(cfg: Config, yaml_path: str) -> Config:
     if hasattr(cfg, 'levels'):
         cfg.d = len(cfg.levels)
 
+    # Si R_b est surchargé sans B_e, lier dynamiquement B_e = R_b / 2
+    if 'R_b' in params and 'B_e' not in params:
+        cfg.B_e = float(cfg.R_b) / 2.0
+
     return cfg
+
+
+def evaluate_model(model, dataloader, device, link_distance):
+    """Boucle d'évaluation standard (calcul des métriques pour l'article)."""
+    from losses.reconstruction import psnr, ssim
+    from utils.metrics import compute_miou, compute_top1_accuracy
+
+    model.eval()
+    total_psnr = 0.0
+    total_ssim = 0.0
+    total_ber = 0.0
+    total_miou = 0.0
+    total_acc = 0.0
+    n_batches = len(dataloader)
+    n_miou_batches = 0
+
+    print(f"\n--- Évaluation du modèle à distance {link_distance} m ---")
+    with torch.no_grad():
+        for batch in dataloader:
+            images = batch['image'].to(device)
+            masks = batch['mask'].to(device)
+            labels = batch['label'].to(device)
+            has_mask = batch['has_mask'].to(device).bool()
+
+            outputs = model(images, link_distance=link_distance, phase='phase4', run_heads=True)
+
+            x_hat = outputs['x_hat']
+            total_psnr += psnr(images, x_hat).item()
+            total_ssim += ssim(images, x_hat).item()
+            total_ber += outputs['ber'].item()
+
+            if has_mask.sum() > 0:
+                miou = compute_miou(outputs['seg_logits'][has_mask], masks[has_mask], model.cfg.num_classes_seg)
+                total_miou += miou
+                n_miou_batches += 1
+
+            acc = compute_top1_accuracy(outputs['cls_logits'], labels)
+            total_acc += acc
+
+    avg_psnr = total_psnr / max(1, n_batches)
+    avg_ssim = total_ssim / max(1, n_batches)
+    avg_ber = total_ber / max(1, n_batches)
+    avg_miou = total_miou / max(1, n_miou_batches)
+    avg_acc = total_acc / max(1, n_batches)
+
+    print(f"Résultats d'évaluation :")
+    print(f"  • PSNR moyen       : {avg_psnr:.2f} dB")
+    print(f"  • SSIM moyen       : {avg_ssim:.4f}")
+    print(f"  • BER moyen (p)    : {avg_ber:.4e}")
+    print(f"  • mIoU Coraux      : {avg_miou:.4f}")
+    print(f"  • Précision Top-1  : {avg_acc * 100:.2f} %")
+
+    return {
+        'psnr': avg_psnr,
+        'ssim': avg_ssim,
+        'ber': avg_ber,
+        'miou': avg_miou,
+        'accuracy': avg_acc,
+    }
 
 
 def main():
@@ -76,10 +140,18 @@ def main():
     if getattr(args, 'use_real_task_heads', None) is not None:
         cfg.use_real_task_heads = args.use_real_task_heads
     if getattr(args, 'seed', None) is not None:
-        torch.manual_seed(args.seed)
+        import random
+        import numpy as np
+        seed = args.seed
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
 
     device = torch.device(cfg.device)
-    print(f"--- Démarrage de l'entraînement UWOC-SemCom sur {device} ---")
+    print(f"--- Démarrage UWOC-SemCom sur {device} (Mode : {args.mode.upper()}) ---")
     print(f"Distance du lien : {cfg.link_distance} m | Type de canal : {cfg.channel_type}")
 
     batch_size = getattr(cfg, 'batch_size', 4)
@@ -103,24 +175,34 @@ def main():
         )
 
     # 4. Échantillonneur stratifié (Stratified Sampler)
-    # Garantit qu'au moins 50% de chaque batch contient des images avec de vrais masques de coraux
     sampler = StratifiedSampler(
         dataset=dataset,
         batch_size=batch_size,
         min_pos_ratio=0.5,
-        shuffle=True,
+        shuffle=(args.mode == 'train'),
         seed=getattr(args, 'seed', None),
     )
     dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
-    print(f"DataLoader initialisé avec StratifiedSampler (batch_size={batch_size}, min_pos_ratio=50%)")
 
     # 5. Instanciation du Modèle complet
     model = UWOCSemComPipeline(cfg).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
+    # Reprise depuis un checkpoint (--resume)
+    from utils.checkpoint import save_checkpoint, load_checkpoint
+    if getattr(args, 'resume', None) and os.path.isfile(args.resume):
+        load_checkpoint(model, args.resume, optimizer=optimizer if args.mode == 'train' else None, map_location=device)
+        print(f"Checkpoint chargé avec succès depuis : {args.resume}")
+
+    # Mode Évaluation pure
+    if args.mode == 'eval':
+        evaluate_model(model, dataloader, device, cfg.link_distance)
+        return
+
     # 6. Planificateur AMP et boucle d'entraînement
     total_epochs = args.epochs if getattr(args, 'epochs', None) is not None else 10
     scheduler = AMPScheduler(total_epochs=total_epochs)
+    ckpt_dir = os.path.join(os.getcwd(), 'checkpoints')
 
     if getattr(args, 'phase', None) is not None:
         phase_num = args.phase
@@ -135,6 +217,7 @@ def main():
             elif phase_num == 4:
                 loss = train_phase4_epoch(model, dataloader, optimizer, device, cfg.link_distance)
             print(f"[Phase {phase_num} - Epoch {epoch+1}/{total_epochs}] Loss : {loss:.4f}")
+            save_checkpoint(model, optimizer, epoch + 1, f'phase{phase_num}', ckpt_dir, tag='last')
     else:
         for epoch in range(total_epochs):
             phase_id, phase_name = scheduler.get_phase(epoch)
@@ -150,6 +233,9 @@ def main():
                 loss = train_phase4_epoch(model, dataloader, optimizer, device, cfg.link_distance)
 
             print(f"--> Loss moyenne : {loss:.4f}")
+            save_checkpoint(model, optimizer, epoch + 1, phase_id, ckpt_dir, tag='last')
+
+    print(f"\nEntraînement terminé. Checkpoints sauvegardés dans : {ckpt_dir}")
 
 
 if __name__ == "__main__":

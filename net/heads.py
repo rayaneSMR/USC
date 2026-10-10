@@ -69,6 +69,7 @@ _MIT_B5_CONFIG = dict(
     strides=[4, 2, 2, 2],
     num_attention_heads=[1, 2, 5, 8],
     mlp_ratios=[4, 4, 4, 4],
+    decoder_hidden_size=768,
 )
 
 
@@ -76,13 +77,17 @@ class SegFormerSegmentationHead(nn.Module):
     """
     Vraie tête de segmentation sémantique SegFormer (§3.4), appliquée
     directement sur x_hat -- encodeur MiT-B5 propre à cette tête (indépendant
-    de celui de l'émetteur) + SegformerDecodeHead officiel. Upsample la
-    sortie (nativement H/4, W/4) vers la résolution de x_hat.
+    de celui de l'émetteur) + SegformerDecodeHead officiel. Normalise
+    l'entrée [0, 1] vers ImageNet mean/std et upsample la sortie (nativement
+    H/4, W/4) vers la résolution de x_hat.
     """
 
     def __init__(self, num_classes=2, pretrained_name=None, freeze_encoder=False):
         super().__init__()
         from transformers import SegformerConfig, SegformerForSemanticSegmentation
+
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
         if pretrained_name is not None:
             self.model = SegformerForSemanticSegmentation.from_pretrained(
@@ -96,7 +101,8 @@ class SegFormerSegmentationHead(nn.Module):
                 p.requires_grad = False
 
     def forward(self, x_hat):
-        out = self.model(pixel_values=x_hat)
+        norm_x = (x_hat - self.mean) / self.std
+        out = self.model(pixel_values=norm_x)
         logits = out.logits
         logits = F.interpolate(logits, size=x_hat.shape[-2:], mode='bilinear', align_corners=False)
         return logits
@@ -106,12 +112,16 @@ class SegFormerClassificationHead(nn.Module):
     """
     Vraie tête de classification SegFormer (§3.4), appliquée directement sur
     x_hat -- encodeur MiT-B5 propre + tête linéaire officielle
-    (`SegformerForImageClassification`).
+    (`SegformerForImageClassification`). Normalise l'entrée [0, 1] vers
+    ImageNet mean/std.
     """
 
     def __init__(self, num_classes=10, pretrained_name=None, freeze_encoder=False):
         super().__init__()
         from transformers import SegformerConfig, SegformerForImageClassification
+
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
         if pretrained_name is not None:
             self.model = SegformerForImageClassification.from_pretrained(
@@ -125,7 +135,8 @@ class SegFormerClassificationHead(nn.Module):
                 p.requires_grad = False
 
     def forward(self, x_hat):
-        out = self.model(pixel_values=x_hat)
+        norm_x = (x_hat - self.mean) / self.std
+        out = self.model(pixel_values=norm_x)
         return out.logits
 
 

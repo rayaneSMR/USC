@@ -32,19 +32,15 @@ def get_dataset_mask_flags(dataset) -> List[bool]:
             flags.append(os.path.exists(mask_path))
         return flags
     
-    # Inspection directe par échantillon si taille raisonnable
+    # Inspection directe par échantillon pour tous les indices (sans extrapolation aléatoire)
     n = len(dataset)
     flags = []
-    for i in range(min(n, 200)):
+    for i in range(n):
         sample = dataset[i]
         hm = sample.get('has_mask', True)
         if isinstance(hm, torch.Tensor):
             hm = bool(hm.item())
         flags.append(bool(hm))
-    if len(flags) < n:
-        # Étendre avec le pattern observé ou True par défaut
-        ratio = sum(flags) / max(len(flags), 1)
-        flags.extend([random.random() < ratio for _ in range(n - len(flags))])
     return flags
 
 

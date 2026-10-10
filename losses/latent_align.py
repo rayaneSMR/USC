@@ -44,6 +44,8 @@ def compute_phase4_loss(seg_logits, seg_masks, cls_logits=None, cls_labels=None,
     """
     if has_mask is None:
         has_mask = torch.ones(seg_masks.shape[0], dtype=torch.bool, device=seg_masks.device)
+    else:
+        has_mask = has_mask.bool().to(seg_masks.device)
 
     n_valid = has_mask.sum()
 
@@ -59,15 +61,13 @@ def compute_phase4_loss(seg_logits, seg_masks, cls_logits=None, cls_labels=None,
         targets_one_hot = F.one_hot(seg_masks, num_classes=seg_logits.shape[1]).permute(0, 3, 1, 2).float()
         intersection = (probs * targets_one_hot).sum(dim=(2, 3))
         union = probs.sum(dim=(2, 3)) + targets_one_hot.sum(dim=(2, 3))
-        dice_per_sample = 1.0 - (2. * intersection / (union + 1e-8)).mean(dim=1)
+        smooth = 1.0
+        dice_per_sample = 1.0 - ((2. * intersection + smooth) / (union + smooth)).mean(dim=1)
         dice_loss = dice_per_sample[has_mask].mean()
 
         total = ce_loss + lambda_dice * dice_loss
     else:
-        # Aucun échantillon du batch n'a de masque réel -- pas de perte de
-        # segmentation ce coup-ci (arrive si un batch tombe entièrement sur
-        # des images has_mask=0 ; statistiquement rare avec un DataLoader
-        # mélangé, shuffle=True et un taux de masque réel de 65-80%).
+        # Aucun échantillon du batch n'a de masque réel (garde-fou si le StratifiedSampler n'est pas utilisé)
         total = torch.zeros((), device=seg_logits.device, requires_grad=True)
 
     if cls_logits is not None and cls_labels is not None:

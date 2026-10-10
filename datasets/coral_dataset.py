@@ -89,14 +89,15 @@ class CoralDataset(Dataset):
             mask_path = os.path.join(self.mask_dir, stem + '.png')
             self.has_mask_list.append(os.path.exists(mask_path))
 
-        image_tf_steps = [
+        # Toutes les images restent strictement dans [0, 1] (T.ToTensor).
+        # Cela garantit que x et x_hat (sortie du Generator avec Sigmoid)
+        # partagent le même espace physique pour la perte L1, le PSNR et le SSIM.
+        # La normalisation ImageNet nécessaire aux backbones/têtes SegFormer
+        # est appliquée de manière différentiable directement dans leurs modules.
+        self.image_tf = T.Compose([
             T.Resize((image_size, image_size)),
             T.ToTensor(),  # -> [0,1]
-        ]
-        if backbone_name in _BACKBONES_REQUIRING_IMAGENET_NORM:
-            image_tf_steps.append(T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
-        # yolo26/simple_cnn : on s'arrête à [0,1], pas de normalisation ImageNet.
-        self.image_tf = T.Compose(image_tf_steps)
+        ])
 
         self.mask_tf = T.Compose([
             T.Resize((image_size, image_size), interpolation=T.InterpolationMode.NEAREST),
@@ -110,19 +111,10 @@ class CoralDataset(Dataset):
         img = Image.open(os.path.join(self.image_dir, fname)).convert('RGB')
         x = self.image_tf(img)
 
-        # Le masque partage le STEM du nom de fichier mais pas forcément
-        # l'extension (images en .jpg, masques toujours en .png -- voir
-        # net/multiscale... non, voir coral_dataset_merge_pipeline_v2.ipynb
-        # Step 3 : Image.fromarray(mask_arr, mode='L').save(..., '.png')).
+        # Le masque partage le stem du fichier image mais avec extension .png
         stem = os.path.splitext(fname)[0]
         mask_path = os.path.join(self.mask_dir, stem + '.png')
-
-        has_mask_flag = self.has_mask_flags.get(fname, None)
-        mask_file_exists = os.path.exists(mask_path)
-        # Cohérence : si labels.csv dit has_mask=1 mais le fichier est
-        # introuvable (ou l'inverse), on fait confiance au fichier réel --
-        # plus robuste qu'un flag CSV potentiellement désynchronisé.
-        has_mask = mask_file_exists
+        has_mask = os.path.exists(mask_path)
 
         if has_mask:
             mask = Image.open(mask_path)

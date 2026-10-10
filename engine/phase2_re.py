@@ -27,6 +27,14 @@ def train_phase2a_epoch(model, dataloader, optimizer, device, link_distance, bet
     for param in model.generator.parameters():
         param.requires_grad = True
 
+    # 3. Gel des têtes de tâches aval en mode eval
+    model.seg_head.eval()
+    for param in model.seg_head.parameters():
+        param.requires_grad = False
+    model.cls_head.eval()
+    for param in model.cls_head.parameters():
+        param.requires_grad = False
+
     total_loss = 0.0
 
     for batch in dataloader:
@@ -34,8 +42,8 @@ def train_phase2a_epoch(model, dataloader, optimizer, device, link_distance, bet
 
         optimizer.zero_grad()
 
-        # Forward pass (BFP + MATK actifs)
-        outputs = model(images, link_distance=link_distance, phase='phase2a')
+        # Forward pass (BFP + MATK actifs, sans calcul inutile des têtes de tâche)
+        outputs = model(images, link_distance=link_distance, phase='phase2a', run_heads=False)
 
         loss = compute_phase2a_loss(
             x=images,

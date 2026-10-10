@@ -24,13 +24,13 @@ class UpBlock(nn.Module):
 
 class Generator(nn.Module):
     """
-    Entrée: z_restored (B, d, H, W) avec H=W=feature_map_size (ex 96).
+    Entrée: z_restored (B, d, H, W) avec H=W=feature_map_size (ex H_feat, W_feat).
     Sortie: x_hat (B, 3, H_img, W_img) dans [0, 1].
     Le facteur d'upsampling total doit correspondre au ratio entre
     feature_map_size et image_size (ex backbone stride /8 -> 3 UpBlocks).
     """
 
-    def __init__(self, in_channels, base_channels=128, num_upsamples=3, out_channels=3):
+    def __init__(self, in_channels, base_channels=128, num_upsamples=3, out_channels=3, min_channels=32):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, base_channels, 3, padding=1),
@@ -40,8 +40,9 @@ class Generator(nn.Module):
         blocks = []
         ch = base_channels
         for _ in range(num_upsamples):
-            blocks.append(UpBlock(ch, ch // 2))
-            ch //= 2
+            next_ch = max(min_channels, ch // 2)
+            blocks.append(UpBlock(ch, next_ch))
+            ch = next_ch
         self.upsamples = nn.Sequential(*blocks)
         self.out_conv = nn.Sequential(
             nn.Conv2d(ch, out_channels, 3, padding=1),

@@ -47,6 +47,21 @@ class SimpleCNNBackbone(nn.Module):
         return self.stem(x)
 
 
+class _YOLOPassThroughHead(nn.Module):
+    """
+    Remplace la tête Segment26 de YOLO26 pour court-circuiter le calcul lourd
+    de détection/masques d'instance et d'ancres inutile à l'émetteur sémantique,
+    tout en préservant le routage des couches (f, i) pour Ultralytics.
+    """
+    def __init__(self, orig_head):
+        super().__init__()
+        self.f = orig_head.f
+        self.i = orig_head.i
+
+    def forward(self, x):
+        return x
+
+
 class YOLO26Backbone(nn.Module):
     """
     Backbone+neck de YOLO26-seg (émetteur), tête `Segment26` détachée.
@@ -82,27 +97,30 @@ class YOLO26Backbone(nn.Module):
                 f"`local_weights_dir` avant l'exécution. Erreur d'origine: {e}"
             ) from e
 
-        self.head_module = self.yolo_model.model[-1]
+        # Remplacement de la tête Segment26 par une tête pass-through
+        orig_head = self.yolo_model.model[-1]
+        self.yolo_model.model[-1] = _YOLOPassThroughHead(orig_head)
         self.feature_scale = feature_scale
-
-        self._captured_inputs = None
-        self._hook_handle = self.head_module.register_forward_pre_hook(self._capture_head_input)
 
         # détermine out_channels par une passe factice
         self.eval()
         with torch.no_grad():
-            dummy = torch.randn(1, 3, 384, 384)
-            feats = self._forward_capture(dummy)
+            dummy = torch.randn(1, 3, 128, 128)
+            feats = self.yolo_model(dummy)
         self.out_channels = feats[self.feature_scale].shape[1]
 
         if freeze:
             for p in self.yolo_model.parameters():
                 p.requires_grad = False
+            self.yolo_model.eval()
+        else:
+            for p in self.yolo_model.parameters():
+                p.requires_grad = True
 
     @staticmethod
     def _resolve_weights_path(weights, local_weights_dir):
         """Cherche `weights` localement avant de laisser ultralytics tenter
-        un téléchargement (qui échouera sans réseau -- voir point 8)."""
+        un téléchargement (qui échouera sans réseau)."""
         import os
         candidates = [weights]
         if local_weights_dir is not None:
@@ -112,28 +130,13 @@ class YOLO26Backbone(nn.Module):
                 return path
         return weights  # laisse ultralytics gérer le téléchargement
 
-    def _capture_head_input(self, module, inputs):
-        self._captured_inputs = inputs[0]
-        return inputs
-
-    def _forward_capture(self, x):
-        self._captured_inputs = None
-        _ = self.yolo_model(x)
-        feats = self._captured_inputs
-        if feats is None:
-            raise RuntimeError(
-                "L'entrée de la tête YOLO26 n'a pas été capturée. "
-                "Vérifier la version d'ultralytics installée (API interne susceptible de changer)."
-            )
-        return feats  # liste de tenseurs multi-échelle
-
     def extract_multi_scale_features(self, x):
         """Retourne la liste complète des cartes multi-échelle (P3, P4, P5)."""
-        return self._forward_capture(x)
+        return self.yolo_model(x)
 
     def forward(self, x):
         """Retourne une carte de features unique (échelle `feature_scale`)."""
-        feats = self._forward_capture(x)
+        feats = self.yolo_model(x)
         return feats[self.feature_scale]
 
 
@@ -165,6 +168,9 @@ class SegFormerMiTB5Backbone(nn.Module):
         super().__init__()
         from transformers import SegformerModel, SegformerConfig
 
+        self.register_buffer('imagenet_mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('imagenet_std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
         if pretrained_name is not None:
             self.encoder = SegformerModel.from_pretrained(pretrained_name)
         else:
@@ -180,7 +186,8 @@ class SegFormerMiTB5Backbone(nn.Module):
 
     def extract_multi_scale_features(self, x):
         """Retourne la liste complète des 4 échelles (B,C,H,W) déjà spatiales."""
-        out = self.encoder(pixel_values=x, output_hidden_states=True, return_dict=True)
+        norm_x = (x - self.imagenet_mean) / self.imagenet_std
+        out = self.encoder(pixel_values=norm_x, output_hidden_states=True, return_dict=True)
         return list(out.hidden_states)
 
     def forward(self, x):
@@ -215,8 +222,11 @@ class Backbone(nn.Module):
             self.out_channels = self.model.out_channels
 
         elif backbone_name == 'segformer_mitb5':
+            resolved_pretrained_name = segformer_pretrained_name
+            if pretrained and resolved_pretrained_name is None:
+                resolved_pretrained_name = 'nvidia/mit-b5'
             self.model = SegFormerMiTB5Backbone(
-                pretrained_name=segformer_pretrained_name if pretrained else None,
+                pretrained_name=resolved_pretrained_name if pretrained else None,
                 feature_scale=feature_scale, freeze=freeze,
             )
             self.out_channels = self.model.out_channels

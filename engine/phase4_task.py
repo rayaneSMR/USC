@@ -9,17 +9,31 @@ from losses.latent_align import compute_phase4_loss
 
 
 def train_phase4_epoch(model, dataloader, optimizer, device, link_distance):
-    model.train()
-
-    # 1. Gel COMPLET de la chaîne de transmission et de reconstruction
+    # 1. Gel COMPLET de la chaîne de transmission et de reconstruction en mode eval
+    # (empêche BatchNorm et Dropout de modifier les statistiques de l'encodeur/décodeur)
+    model.eval()
     for param in model.parameters():
         param.requires_grad = False
 
     # 2. Activation uniquement des têtes de tâches aval
+    model.seg_head.train()
     for param in model.seg_head.parameters():
         param.requires_grad = True
+    model.cls_head.train()
     for param in model.cls_head.parameters():
         param.requires_grad = True
+
+    # Si l'encodeur de la tête est gelé (ex. backbone MiT de SegFormerHead)
+    freeze_encoders = getattr(getattr(model, 'cfg', None), 'freeze_task_head_encoders', True)
+    if freeze_encoders:
+        if hasattr(model.seg_head, 'encoder') and model.seg_head.encoder is not None:
+            model.seg_head.encoder.eval()
+            for p in model.seg_head.encoder.parameters():
+                p.requires_grad = False
+        if hasattr(model.cls_head, 'encoder') and model.cls_head.encoder is not None:
+            model.cls_head.encoder.eval()
+            for p in model.cls_head.encoder.parameters():
+                p.requires_grad = False
 
     total_loss = 0.0
     for batch in dataloader:
@@ -31,7 +45,7 @@ def train_phase4_epoch(model, dataloader, optimizer, device, link_distance):
         optimizer.zero_grad()
 
         # Passage dans le modèle complet avec bruit de canal (pas de MATK en phase4)
-        outputs = model(images, link_distance=link_distance, phase='phase4')
+        outputs = model(images, link_distance=link_distance, phase='phase4', run_heads=True)
 
         loss = compute_phase4_loss(
             seg_logits=outputs['seg_logits'], seg_masks=masks,

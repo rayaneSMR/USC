@@ -50,7 +50,7 @@ class Channel(nn.Module):
         # Récepteur optique et débit binaire
         # B_e est lié dynamiquement au débit binaire : B_e ≈ R_b / 2
         self.R_b = getattr(cfg, 'R_b', 1e6)
-        if hasattr(cfg, 'B_e') and cfg.B_e is not None and getattr(cfg, 'B_e') != 1e6:
+        if hasattr(cfg, 'B_e') and cfg.B_e is not None:
             self.B_e = float(cfg.B_e)
         else:
             self.B_e = self.R_b / 2.0
@@ -59,6 +59,9 @@ class Channel(nn.Module):
         self.R_L = getattr(cfg, 'R_L', 1e3)
         self.G = getattr(cfg, 'G', 1e5)
         self.T_e = getattr(cfg, 'T_e', 290.0)
+        self.F = float(getattr(cfg, 'F', 1.1))                       # Facteur de bruit d'excès SiPM
+        self.dark_current = float(getattr(cfg, 'dark_current', 1e-9))# Courant d'obscurité primaire (A)
+        self.P_tx = float(getattr(cfg, 'P_tx', 0.01))                # Puissance optique émise (W, ex 10 mW)
 
         if getattr(cfg, 'logger', None):
             cfg.logger.info('【Channel】: Built {} channel, distance {} m.'.format(
@@ -150,51 +153,97 @@ class Channel(nn.Module):
 
     def pointing_error_rayleigh(self, shape, device, link_distance):
         """
-        Erreur de pointage géométrique (déviation radiale r_d, distribution
-        de Rayleigh liée à la gigue angulaire de surface σ_θt -- §3.2).
-        r_d = σ_θt (rad) x distance (m) x |N(0,1)| -- approximation small-angle.
+        Erreur de pointage géométrique (déviation radiale r_d, distribution de Rayleigh 2D
+        liée à la gigue angulaire de surface σ_θt -- Ijeh et al. 2022, §3.2).
+        r_d = σ_θt (rad) x L (m) x sqrt(nx^2 + ny^2), avec nx, ny ~ N(0, 1) i.i.d.
         Calcul dynamique de w_Leq via l'Équation 24 en fonction de w_L(L) et D_r.
         """
-        r_d = self.sigma_theta_t * link_distance * torch.abs(
-            torch.normal(mean=0.0, std=1.0, size=shape, device=device))
+        nx = torch.randn(shape, device=device)
+        ny = torch.randn(shape, device=device)
+        r_d = self.sigma_theta_t * link_distance * torch.sqrt(nx ** 2 + ny ** 2)
 
         A0, w_Leq2, _ = self.compute_pe_geometry(link_distance, device)
         return A0 * torch.exp(-2.0 * (r_d ** 2) / w_Leq2)
 
     def channel_gain(self, shape, link_distance, device):
+        """
+        Gain global du canal h = h_c * h_t * h_p.
+        Fading lent : la turbulence et l'erreur de pointage évoluent à l'échelle
+        de la milliseconde (vagues, dérive de plateforme) et sont donc cohérentes
+        sur l'ensemble des bits d'une même trame/image (shape_slow = (B, 1, 1, 1)).
+        """
+        shape_slow = (shape[0], 1, 1, 1) if len(shape) >= 2 else shape
         h_c = self.beer_lambert_gain(link_distance, device)
-        h_t = self.turbulence_lognormal(shape, device, link_distance=link_distance)
-        h_p = self.pointing_error_rayleigh(shape, device, link_distance)
+        h_t = self.turbulence_lognormal(shape_slow, device, link_distance=link_distance)
+        h_p = self.pointing_error_rayleigh(shape_slow, device, link_distance)
         return h_c * h_t * h_p
 
-    # ---- Bruit post-détection (grenaille + thermique) ----
+    # ---- Bruit post-détection (grenaille SiPM + thermique TIA) en ampères ----
 
-    def sipm_noise_std(self, I_s, I_d=0.0, I_b=0.0):
-        """sigma_n^2 = R_L^2 . 2e.G.F.B_e.(I_s+I_d+I_b) + 4.k_B.T_e.B_e / R_L"""
+    def sipm_noise_std(self, I_ph: torch.Tensor, I_d: float = None, I_b: float = 0.0):
+        """
+        Écart-type du bruit total en courant (A) post-détection SiPM + TIA (Ijeh et al. 2022).
+        sigma_n^2 = sigma_shot^2 + sigma_thermal^2 [A^2]
+        - sigma_shot^2 = 2 * q * G^2 * F * B_e * (I_ph + I_d + I_b)  [A^2]
+        - sigma_thermal^2 = 4 * k_B * T_e * B_e / R_L                [A^2]
+        """
         k_B = 1.380649e-23
         e_charge = 1.602176634e-19
-        shot = 2.0 * e_charge * self.G * self.B_e * (I_s + I_d + I_b)
-        thermal = 4.0 * k_B * self.T_e * self.B_e / self.R_L
-        sigma_n2 = (self.R_L ** 2) * shot + thermal
+        i_dark = self.dark_current if I_d is None else I_d
+
+        shot = 2.0 * e_charge * (self.G ** 2) * self.F * self.B_e * (I_ph + i_dark + I_b)
+        thermal = (4.0 * k_B * self.T_e * self.B_e) / self.R_L
+        sigma_n2 = shot + thermal
         return torch.sqrt(torch.clamp(sigma_n2, min=1e-30))
 
     def optimal_threshold_ber(self, r0_mean, r1_mean, sigma_n0, sigma_n1):
-        """BER théorique conditionnel p, via seuil gaussien optimal gamma_th (§3.2)."""
+        """BER théorique conditionnel p, via seuil gaussien optimal gamma_th (Ijeh et al. 2022)."""
         gamma_th = (r0_mean * sigma_n1 + r1_mean * sigma_n0) / (sigma_n0 + sigma_n1)
         term0 = torch.erfc((gamma_th - r0_mean) / (math.sqrt(2) * sigma_n0))
         term1 = torch.erfc((r1_mean - gamma_th) / (math.sqrt(2) * sigma_n1))
         p = 0.25 * term0 + 0.25 * term1
         return p, gamma_th
 
+    def ber_analytic(self, link_distance: float) -> float:
+        """
+        Calcul analytique scalaire du BER moyen à distance L (pour courbes et évaluation).
+        """
+        device = torch.device('cpu')
+        A0, _ = self.compute_pe_geometry(link_distance, device)
+        h_c = self.beer_lambert_gain(link_distance, device)
+        h_mean = float((h_c * A0).item())
+
+        P_rx1 = self.P_tx * h_mean
+        I_ph1 = self.R_e * P_rx1
+        I_s1 = self.G * I_ph1
+        I_s0 = 0.0
+
+        k_B = 1.380649e-23
+        e_charge = 1.602176634e-19
+        var_th = (4.0 * k_B * self.T_e * self.B_e) / self.R_L
+        var_shot1 = 2.0 * e_charge * (self.G ** 2) * self.F * self.B_e * (I_ph1 + self.dark_current)
+        var_shot0 = 2.0 * e_charge * (self.G ** 2) * self.F * self.B_e * self.dark_current
+
+        sig1 = math.sqrt(var_shot1 + var_th)
+        sig0 = math.sqrt(var_shot0 + var_th)
+        gamma_th = (I_s0 * sig1 + I_s1 * sig0) / (sig0 + sig1)
+        term0 = math.erfc((gamma_th - I_s0) / (math.sqrt(2) * sig0))
+        term1 = math.erfc((I_s1 - gamma_th) / (math.sqrt(2) * sig1))
+        return 0.25 * term0 + 0.25 * term1
+
     # ---- Interface principale ----
 
-    def forward(self, bits: torch.Tensor, link_distance: float):
+    def forward(self, bits: torch.Tensor, link_distance):
         """
         bits: (B, n_bits, H, W) flux binaire {0,1} float, différentiable.
-        Retourne (b_hat, p) : bits reçus (STE) et BER théorique moyen (§3.2,
-        formule exacte via erfc, calculée par élément puis moyennée).
+        link_distance: distance en mètres (float ou torch.Tensor).
+        Retourne (b_hat, p) : bits reçus (STE) et BER théorique moyen.
         """
         device = bits.device
+        if isinstance(link_distance, torch.Tensor):
+            link_distance = float(link_distance.item())
+        else:
+            link_distance = float(link_distance)
 
         if self.chan_type == 'none':
             return bits, torch.zeros(1, device=device)
@@ -202,25 +251,28 @@ class Channel(nn.Module):
         shape = bits.shape
         h = self.channel_gain(shape, link_distance, device)
 
-        P_tx = 1.0  # puissance optique normalisée (OOK idéal : 0 si bit=0, P_tx si bit=1)
-        I_s1 = self.R_e * h * P_tx
+        # Modèle de transmission optique OOK (Ijeh et al. 2022) :
+        # Puissance optique reçue pour un bit '1' : P_rx1 = P_tx * h
+        P_rx1 = self.P_tx * h
+        I_ph1 = self.R_e * P_rx1              # Photocourant primaire (A)
+        I_s1 = self.G * I_ph1                 # Courant de signal amplifié SiPM (A)
         I_s0 = torch.zeros_like(I_s1)
 
-        sigma_n1 = self.sipm_noise_std(I_s1)
-        sigma_n0 = self.sipm_noise_std(I_s0)
+        # Écart-type du bruit pour '1' et '0' en ampères
+        sigma_n1 = self.sipm_noise_std(I_ph1)
+        sigma_n0 = self.sipm_noise_std(torch.zeros_like(I_ph1))
 
-        # Seuil optimal γ_th et BER théorique EXACTS (§3.2, formule erfc),
-        # calculés par élément (dépendent de h, donc varient dans l'image).
+        # Seuil optimal γ_th et BER théorique exacts en ampères
         p_elementwise, gamma_th = self.optimal_threshold_ber(I_s0, I_s1, sigma_n0, sigma_n1)
 
-        # Signal effectivement reçu selon le bit RÉELLEMENT envoyé
+        # Signal physique reçu selon les bits transmis
         I_s = torch.where(bits >= 0.5, I_s1, I_s0)
         sigma_n = torch.where(bits >= 0.5, sigma_n1, sigma_n0)
         r = I_s + torch.randn_like(I_s) * sigma_n
 
         b_hat_hard = (r > gamma_th).float()
 
-        # STE : forward = décision dure, backward = gradient identité.
+        # STE : forward = décision dure, backward = gradient identité
         noise = (b_hat_hard - bits).detach()
         b_hat = bits + noise
 

@@ -25,14 +25,14 @@ class ASFF(nn.Module):
         ex [64, 128, 256] pour YOLO26 ou [64, 128, 320, 512] pour SegFormer.
     fusion_channels: nb de canaux communs après projection 1x1 (C_ref).
     reference_index: index de l'échelle dont la résolution spatiale sert de
-        référence pour l'upsampling des autres échelles. Par défaut -1
-        (échelle la plus profonde/petite) pour respecter la contrainte edge :
-        les convs `weight_conv` (3x3) tournent à la résolution de référence,
-        donc choisir l'échelle la plus fine comme référence ferait tourner
-        ces convs sur la plus grande carte spatiale pour CHAQUE échelle
-        (y compris les profondes upsamplées) -- coût inutilement élevé pour
-        un émetteur edge. Mettre 0 (échelle la plus fine) uniquement si le
-        détail spatial fin prime sur le coût de calcul.
+        référence pour l'alignement spatial (redimensionnement / pooling) des
+        autres échelles. Par défaut -1 (échelle la plus profonde/petite) pour
+        respecter la contrainte edge : les convs `weight_conv` (3x3) tournent
+        à la résolution de référence, donc choisir l'échelle la plus fine comme
+        référence ferait tourner ces convs sur la plus grande carte spatiale
+        pour CHAQUE échelle (y compris les profondes upsamplées) -- coût
+        inutilement élevé pour un émetteur edge. Mettre 0 (échelle la plus fine)
+        uniquement si le détail spatial fin prime sur le coût de calcul.
     """
 
     def __init__(self, in_channels_list, fusion_channels=64, reference_index=-1):
@@ -70,7 +70,12 @@ class ASFF(nn.Module):
         for i, feat in enumerate(features):
             p = self.proj[i](feat)
             if p.shape[-2:] != ref_size:
-                p = F.interpolate(p, size=ref_size, mode='bilinear', align_corners=False)
+                # Anti-aliasing : adaptive_avg_pool2d pour le sous-échantillonnage (sans crénelage et compatible ONNX),
+                # et interpolate bilinéaire pour le sur-échantillonnage
+                if p.shape[-2] >= ref_size[0] and p.shape[-1] >= ref_size[1]:
+                    p = F.adaptive_avg_pool2d(p, ref_size)
+                else:
+                    p = F.interpolate(p, size=ref_size, mode='bilinear', align_corners=False)
             projected.append(p)
 
         # Cartes de poids brutes (B, 1, H_ref, W_ref) par échelle
