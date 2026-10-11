@@ -87,7 +87,11 @@ class CoralDataset(Dataset):
         for fname in self.filenames:
             stem = os.path.splitext(fname)[0]
             mask_path = os.path.join(self.mask_dir, stem + '.png')
-            self.has_mask_list.append(os.path.exists(mask_path))
+            if fname in self.has_mask_flags:
+                has_mask = bool(self.has_mask_flags[fname])
+            else:
+                has_mask = os.path.exists(mask_path)
+            self.has_mask_list.append(has_mask)
 
         # Toutes les images restent strictement dans [0, 1] (T.ToTensor).
         # Cela garantit que x et x_hat (sortie du Generator avec Sigmoid)
@@ -114,12 +118,17 @@ class CoralDataset(Dataset):
         # Le masque partage le stem du fichier image mais avec extension .png
         stem = os.path.splitext(fname)[0]
         mask_path = os.path.join(self.mask_dir, stem + '.png')
-        has_mask = os.path.exists(mask_path)
+        if fname in self.has_mask_flags:
+            has_mask = bool(self.has_mask_flags[fname])
+        else:
+            has_mask = os.path.exists(mask_path)
 
-        if has_mask:
-            mask = Image.open(mask_path)
-            mask = self.mask_tf(mask)
-            mask = torch.from_numpy(np.array(mask)).long()
+        if has_mask and os.path.exists(mask_path):
+            mask_img = Image.open(mask_path)
+            if mask_img.mode != 'L':
+                mask_img = mask_img.convert('L')
+            mask_img = self.mask_tf(mask_img)
+            mask = torch.from_numpy(np.array(mask_img)).long()
         else:
             # Placeholder de zéros -- NE PAS interpréter comme cible réelle,
             # voir has_mask dans le dict retourné et la note en tête de fichier.

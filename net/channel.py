@@ -209,9 +209,14 @@ class Channel(nn.Module):
         Calcul analytique scalaire du BER moyen à distance L (pour courbes et évaluation).
         """
         device = torch.device('cpu')
-        A0, _ = self.compute_pe_geometry(link_distance, device)
+        A0, w_Leq2, w_Leq = self.compute_pe_geometry(link_distance, device)
         h_c = self.beer_lambert_gain(link_distance, device)
-        h_mean = float((h_c * A0).item())
+        # Espérance de gain sous gigue de pointage 2D Rayleigh (Farid & Hranilovic 2007, Ijeh et al. 2022) :
+        # E[h_p] = A0 * w_Leq^2 / (w_Leq^2 + 4 * sigma_s^2), où sigma_s = sigma_theta_t * L
+        sigma_s = self.sigma_theta_t * max(float(link_distance), 0.0)
+        w_Leq2_val = float(w_Leq2.item())
+        pe_mean = float(A0.item()) * (w_Leq2_val / (w_Leq2_val + 4.0 * (sigma_s ** 2) + 1e-18))
+        h_mean = float(h_c.item()) * pe_mean
 
         P_rx1 = self.P_tx * h_mean
         I_ph1 = self.R_e * P_rx1

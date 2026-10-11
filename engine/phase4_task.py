@@ -26,14 +26,15 @@ def train_phase4_epoch(model, dataloader, optimizer, device, link_distance):
     # Si l'encodeur de la tête est gelé (ex. backbone MiT de SegFormerHead)
     freeze_encoders = getattr(getattr(model, 'cfg', None), 'freeze_task_head_encoders', True)
     if freeze_encoders:
-        if hasattr(model.seg_head, 'encoder') and model.seg_head.encoder is not None:
-            model.seg_head.encoder.eval()
-            for p in model.seg_head.encoder.parameters():
-                p.requires_grad = False
-        if hasattr(model.cls_head, 'encoder') and model.cls_head.encoder is not None:
-            model.cls_head.encoder.eval()
-            for p in model.cls_head.encoder.parameters():
-                p.requires_grad = False
+        for head in (model.seg_head, model.cls_head):
+            if hasattr(head, 'model') and hasattr(head.model, 'segformer'):
+                head.model.segformer.eval()
+                for p in head.model.segformer.parameters():
+                    p.requires_grad = False
+            elif hasattr(head, 'encoder') and head.encoder is not None:
+                head.encoder.eval()
+                for p in head.encoder.parameters():
+                    p.requires_grad = False
 
     total_loss = 0.0
     for batch in dataloader:

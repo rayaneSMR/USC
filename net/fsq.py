@@ -4,7 +4,7 @@ Conforme à Mentzer et al., "Finite Scalar Quantization: VQ-VAE Made Simple",
 arXiv:2309.15505 (Google DeepMind, 2023, Appendice A.1).
 
 z_tilde_i = round( (L_i - 1)*(1 - eps)/2 * tanh(z_i + shift_i) ) - offset_i
-où offset_i = 0.5 si L_i est pair (0.0 si impair), et shift_i = tan(offset_i / half_l_i).
+où offset_i = 0.5 si L_i est pair (0.0 si impair), et shift_i = atanh(offset_i / half_l_i) (0 pour L=2).
 
 Pour tout L_i >= 2 (pair ou impair) :
 - Le nombre de niveaux effectifs est exactement L_i (pas de niveau perdu pour L pair).
@@ -36,7 +36,19 @@ class FSQ(nn.Module):
         eps = 1e-3
         half_l = (levels_t - 1.0) * (1.0 - eps) / 2.0
         offset = torch.where(levels_t % 2 == 1, 0.0, 0.5)
-        shift = torch.tan(offset / half_l)
+        # Conforme à Mentzer et al. (arXiv:2309.15505) :
+        # - L impair : offset=0, shift=0 (centré naturellement)
+        # - L=2 : shift=0 pour placer le seuil de décision exactement à z=0 (50%/50% sous loi normale)
+        # - L pair >= 4 : shift = atanh(offset / half_l) pour centrer le niveau zéro
+        shift = torch.where(
+            levels_t == 2,
+            torch.zeros_like(half_l),
+            torch.where(
+                levels_t % 2 == 1,
+                torch.zeros_like(half_l),
+                torch.atanh(torch.clamp(offset / half_l, max=0.9999))
+            )
+        )
         half_width = torch.floor(levels_t / 2.0)
 
         # Buffers 4D pour le broadcasting vectorisé direct (1, d, 1, 1)

@@ -64,6 +64,7 @@ class Config:
         self.theta_div = 0.05       # Demi-angle de divergence du faisceau (rad, w_L ~ theta_div * L)
         self.w0 = 20e-3 * (2.0 ** 0.5) # Waist du faisceau au plan source (m)
         self.sigma_theta_t = 2e-3   # Gigue angulaire de pointage (rad) -- §3.2
+        self.P_tx = 0.01            # Puissance optique émise (W, ex 10 mW)
 
         # Paramètres SiPM / TIA et débit binaire
         self.R_b = 1e6                # Débit binaire (1 Mbps = 1e6 bit/s)

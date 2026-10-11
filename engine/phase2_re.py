@@ -59,3 +59,54 @@ def train_phase2a_epoch(model, dataloader, optimizer, device, link_distance, bet
         total_loss += loss.item()
 
     return total_loss / len(dataloader)
+
+
+def train_phase2b_epoch(model, dataloader, optimizer, device, link_distance, beta=1.0):
+    """
+    Étape 2B (RE) : Mise à jour conjointe Encodeur + Décodeur sous bruit physique (BFP), sans MATK.
+    Permet à l'émetteur d'adapter ses représentations latentes au canal optique sous-marin.
+    """
+    model.train()
+
+    # Dégel complet de l'encodeur et du décodeur
+    for param in model.parameters():
+        param.requires_grad = True
+
+    # Respect du gel éventuel du backbone
+    backbone_frozen = getattr(getattr(model, 'cfg', None), 'backbone_freeze', False)
+    if backbone_frozen:
+        model.backbone.eval()
+        for param in model.backbone.parameters():
+            param.requires_grad = False
+
+    # Gel des têtes de tâches aval en mode eval
+    model.seg_head.eval()
+    for param in model.seg_head.parameters():
+        param.requires_grad = False
+    model.cls_head.eval()
+    for param in model.cls_head.parameters():
+        param.requires_grad = False
+
+    total_loss = 0.0
+    for batch in dataloader:
+        images = batch['image'].to(device)
+
+        optimizer.zero_grad()
+
+        # phase2b : canal actif, sans masque MATK
+        outputs = model(images, link_distance=link_distance, phase='phase2b', run_heads=False)
+
+        loss = compute_phase2a_loss(
+            x=images,
+            x_hat=outputs['x_hat'],
+            z_q=outputs['z_q'],
+            z_restored=outputs['z_restored'],
+            beta=beta,
+        )
+
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)

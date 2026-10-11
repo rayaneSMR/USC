@@ -157,6 +157,18 @@ def test_aperture_averaging_turbulence_variance():
     print(f'test_aperture_averaging_turbulence_variance OK (sigma_T2={channel.sigma_T2:.2e}, Eq43={sT2_eq43:.2e})')
 
 
+def test_ber_analytic_unpacking_and_monotonicity():
+    """Vérifie que ber_analytic ne crashe pas (déballage 3-tuple) et croît avec la distance."""
+    config = DummyConfig()
+    channel = Channel(config)
+    ber_10m = channel.ber_analytic(10.0)
+    ber_75m = channel.ber_analytic(75.0)
+    ber_85m = channel.ber_analytic(85.0)
+    assert 0.0 <= ber_10m <= ber_75m <= ber_85m <= 0.5
+    assert ber_85m > ber_10m
+    print(f'test_ber_analytic_unpacking_and_monotonicity OK (ber_10m={ber_10m:.4e}, ber_85m={ber_85m:.4f})')
+
+
 if __name__ == '__main__':
     test_channel_gradient_flows()
     test_channel_device_derived_from_input_not_stale_attribute()
@@ -165,3 +177,4 @@ if __name__ == '__main__':
     test_w_Leq_equation24_computed_dynamically()
     test_bandwidth_dynamically_bound_to_bitrate()
     test_aperture_averaging_turbulence_variance()
+    test_ber_analytic_unpacking_and_monotonicity()

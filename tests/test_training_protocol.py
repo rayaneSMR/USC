@@ -119,9 +119,34 @@ def test_phase4_loss_with_integer_has_mask():
     print("test_phase4_loss_with_integer_has_mask OK")
 
 
+def test_phase4_segformer_encoder_freeze():
+    """Vérifie que l'encodeur MiT de SegFormer est bien gelé en Phase 4 quand freeze_task_head_encoders=True."""
+    from net.heads import SegFormerSegmentationHead, SegFormerClassificationHead
+    cfg = Config()
+    cfg.backbone_name = 'simple_cnn'
+    cfg.image_size = 32
+    cfg.use_multiscale_fusion = False
+    cfg.use_real_task_heads = True
+    cfg.freeze_task_head_encoders = True
+    cfg.device = 'cpu'
+
+    pipeline = UWOCSemComPipeline(cfg)
+    dummy_loader = [{'image': torch.randn(2, 3, 32, 32),
+                     'mask': torch.zeros(2, 32, 32, dtype=torch.long),
+                     'label': torch.zeros(2, dtype=torch.long),
+                     'has_mask': torch.tensor([1, 1], dtype=torch.int64)}]
+    optimizer = torch.optim.SGD(pipeline.parameters(), lr=1e-3)
+
+    train_phase4_epoch(pipeline, dummy_loader, optimizer, 'cpu', link_distance=0)
+    assert not next(pipeline.seg_head.model.segformer.parameters()).requires_grad
+    assert not next(pipeline.cls_head.model.segformer.parameters()).requires_grad
+    print("test_phase4_segformer_encoder_freeze OK")
+
+
 if __name__ == '__main__':
     test_matk_eval_mode()
     test_pipeline_run_heads_flag()
     test_amp_scheduler_no_skipped_phases()
     test_phase_freeze_modes()
     test_phase4_loss_with_integer_has_mask()
+    test_phase4_segformer_encoder_freeze()

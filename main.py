@@ -17,7 +17,7 @@ from datasets.coral_dataset import CoralDataset, DummyCoralDataset
 from datasets.sampler import StratifiedSampler
 from engine.amp_scheduler import AMPScheduler
 from engine.phase1_fe import train_phase1_epoch
-from engine.phase2_re import train_phase2a_epoch
+from engine.phase2_re import train_phase2a_epoch, train_phase2b_epoch
 from engine.phase3_tta import train_phase3_epoch
 from engine.phase4_task import train_phase4_epoch
 
@@ -60,16 +60,17 @@ def apply_yaml_config(cfg: Config, yaml_path: str) -> Config:
 def evaluate_model(model, dataloader, device, link_distance):
     """Boucle d'évaluation standard (calcul des métriques pour l'article)."""
     from losses.reconstruction import psnr, ssim
-    from utils.metrics import compute_miou, compute_top1_accuracy
+    from utils.metrics import compute_top1_accuracy
 
     model.eval()
     total_psnr = 0.0
     total_ssim = 0.0
     total_ber = 0.0
-    total_miou = 0.0
     total_acc = 0.0
     n_batches = len(dataloader)
-    n_miou_batches = 0
+
+    total_intersections = torch.zeros(model.cfg.num_classes_seg, device=device)
+    total_unions = torch.zeros(model.cfg.num_classes_seg, device=device)
 
     print(f"\n--- Évaluation du modèle à distance {link_distance} m ---")
     with torch.no_grad():
@@ -87,9 +88,13 @@ def evaluate_model(model, dataloader, device, link_distance):
             total_ber += outputs['ber'].item()
 
             if has_mask.sum() > 0:
-                miou = compute_miou(outputs['seg_logits'][has_mask], masks[has_mask], model.cfg.num_classes_seg)
-                total_miou += miou
-                n_miou_batches += 1
+                pred = outputs['seg_logits'][has_mask].argmax(dim=1)
+                target = masks[has_mask]
+                for c in range(model.cfg.num_classes_seg):
+                    pred_c = (pred == c)
+                    target_c = (target == c)
+                    total_intersections[c] += (pred_c & target_c).sum().float()
+                    total_unions[c] += (pred_c | target_c).sum().float()
 
             acc = compute_top1_accuracy(outputs['cls_logits'], labels)
             total_acc += acc
@@ -97,7 +102,13 @@ def evaluate_model(model, dataloader, device, link_distance):
     avg_psnr = total_psnr / max(1, n_batches)
     avg_ssim = total_ssim / max(1, n_batches)
     avg_ber = total_ber / max(1, n_batches)
-    avg_miou = total_miou / max(1, n_miou_batches)
+
+    valid_classes = total_unions > 0
+    if valid_classes.sum() > 0:
+        avg_miou = (total_intersections[valid_classes] / (total_unions[valid_classes] + 1e-6)).mean().item()
+    else:
+        avg_miou = 0.0
+
     avg_acc = total_acc / max(1, n_batches)
 
     print(f"Résultats d'évaluation :")
@@ -211,7 +222,11 @@ def main():
             if phase_num == 1:
                 loss = train_phase1_epoch(model, dataloader, optimizer, device)
             elif phase_num == 2:
-                loss = train_phase2a_epoch(model, dataloader, optimizer, device, cfg.link_distance, beta=1.0)
+                sub = getattr(args, 'sub_phase', '2A').upper()
+                if sub == '2B':
+                    loss = train_phase2b_epoch(model, dataloader, optimizer, device, cfg.link_distance, beta=1.0)
+                else:
+                    loss = train_phase2a_epoch(model, dataloader, optimizer, device, cfg.link_distance, beta=1.0)
             elif phase_num == 3:
                 loss = train_phase3_epoch(model, dataloader, optimizer, device, cfg.link_distance, beta=1.0)
             elif phase_num == 4:
